@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 
 import logging
-from threading import Lock
+import time
 from requests_futures.sessions import FuturesSession
+from threading import Lock, Thread
 
 
 class Usermapper(object):
-    """Build/maintain map of Slack usernames to GH usernames, based on a list
-    "GitHub Username" custom field, which is (in LSSTC) "Xf2JS7M3C1".
+    """Build/maintain map of Slack usernames to GH usernames, based on a
+    provided field, which for LSST is "GitHub Username".
     """
 
     usermap = {}
@@ -26,12 +27,12 @@ class Usermapper(object):
         self.mutex = Lock()
         self.session = FuturesSession(max_workers=max_workers)
         self.field_id = self._get_field_id(field_name)
+        self.mutex.acquire()
         self.userlist = self.rebuild_userlist()
+        self.mutex.release()
         self.session.max_workers = min(max_workers, len(self.userlist))
         logging.debug("Building usermap.")
-        self.rebuild_usermap()
-        self.usermap_initialized = True
-        logging.debug("Usermap built.")
+        Thread(target=self.rebuild_usermap, name='mapbuilder').start()
 
     def github_for_slack_user(self, user):
         """Return the usermap entry for a given Slack user (which should be
@@ -53,6 +54,7 @@ class Usermapper(object):
     def rebuild_usermap(self):
         """Rebuild the entire Slack user -> GitHub user map.
         """
+        logging.debug("Beginning usermap rebuild.")
         newmap = {}
         futures = {}
         for user in self.userlist:
@@ -67,7 +69,11 @@ class Usermapper(object):
                         newmap[user] = ghuser
                     finally:
                         self.mutex.release()
+        self.mutex.acquire()
         self.usermap = newmap
+        self.usermap_initialized = True
+        self.mutex.release()
+        logging.debug("Usermap built.")
 
     def rebuild_userlist(self):
         """Get all users of this Slack instance, with name and id.
@@ -91,6 +97,20 @@ class Usermapper(object):
                 moar = False
         return [{"name": u["name"],
                  "id": u["id"]} for u in userlist]
+
+    def check_initialization(self):
+        try:
+            self._check_initialization()
+            return True
+        except RuntimeError:
+            return False
+
+    def wait_for_initialization(self, delay=1):
+        while True:
+            if self.check_initialization():
+                return
+            logging.debug("Usermap not initialized; sleeping %d s." % delay)
+            time.sleep(delay)
 
     def _get_field_id(self, field_name):
         method = "team.profile.get"
